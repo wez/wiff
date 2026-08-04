@@ -698,6 +698,89 @@ impl GitRepo {
         let _ = self.delete_ref(&scratch).await;
         outcome
     }
+
+    /// The `url.<base>.insteadOf` rewrites in effect for this repository, as
+    /// (alias, base) pairs in config order. Reading them from config rather than
+    /// asking git to expand each remote in turn keeps this one subprocess for
+    /// the whole set, and leaves the substitution a pure function to test.
+    async fn url_rewrites(&self) -> Result<Vec<(String, String)>> {
+        let output = self
+            .spawn(
+                &[
+                    "config".into(),
+                    "--get-regexp".into(),
+                    OsString::from(r"^url\..*\.insteadof$"),
+                ],
+                GitEnv::default(),
+            )
+            .await?;
+        match output.status.code() {
+            // As for remotes, exit 1 is the pattern matching nothing: a git with
+            // no rewrites configured, not a failure.
+            Some(1) => return Ok(Vec::new()),
+            Some(0) => {}
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(Error::Repo(format!(
+                    "git config --get-regexp for url rewrites failed ({}): {}",
+                    output.status,
+                    stderr.trim()
+                )));
+            }
+        }
+        let listing = String::from_utf8(output.stdout).map_err(|source| {
+            Error::Repo(format!("git printed a non-UTF-8 url rewrite: {source}"))
+        })?;
+        let mut rewrites = Vec::new();
+        for line in listing.lines() {
+            let Some((key, alias)) = line.split_once(' ') else {
+                return Err(Error::Repo(format!(
+                    "git config printed an unreadable url rewrite line: {line:?}"
+                )));
+            };
+            // The key is `url.<base>.insteadOf`, printed with the variable name
+            // lowercased; a base is itself a URL prefix full of dots and colons,
+            // so strip the fixed prefix and suffix rather than splitting.
+            let base = key
+                .strip_prefix("url.")
+                .and_then(|rest| rest.strip_suffix(".insteadof"))
+                .ok_or_else(|| {
+                    Error::Repo(format!(
+                        "git config printed an unexpected url rewrite key: {key:?}"
+                    ))
+                })?;
+            // An empty alias would prefix-match every URL; git treats it as no
+            // rewrite, so drop it here rather than rewriting everything.
+            if alias.is_empty() {
+                continue;
+            }
+            rewrites.push((alias.to_string(), base.to_string()));
+        }
+        Ok(rewrites)
+    }
+}
+
+/// Apply git's `url.<base>.insteadOf` rewrites to a clone URL, as git itself
+/// does before reaching for a remote. A remote can be configured through an
+/// alias (`octo:demo.git` for `git@github.com:octo/demo.git`), whose own text
+/// names neither the forge's host nor the repository; expanding it here means
+/// everything downstream reads the URL git would really contact. The longest
+/// matching alias wins, and among equally long ones the first in config order,
+/// matching git's own choice. A URL matching no alias is its own rewrite.
+fn rewrite_clone_url(clone_url: &str, rewrites: &[(String, String)]) -> String {
+    let mut best: Option<(&str, &str)> = None;
+    for (alias, base) in rewrites {
+        if !clone_url.starts_with(alias.as_str()) {
+            continue;
+        }
+        if best.is_none_or(|(longest, _)| alias.len() > longest.len()) {
+            best = Some((alias, base));
+        }
+    }
+    match best {
+        Some((alias, base)) => format!("{base}{}", &clone_url[alias.len()..]),
+        None => clone_url.to_string(),
+    }
 }
 
 #[async_trait]
@@ -769,6 +852,10 @@ impl ScmRepo for GitRepo {
                 name: name.to_string(),
                 url: url.to_string(),
             });
+        }
+        let rewrites = self.url_rewrites().await?;
+        for remote in &mut remotes {
+            remote.url = rewrite_clone_url(&remote.url, &rewrites);
         }
         Ok(remotes)
     }
@@ -1132,7 +1219,7 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Output};
 
-    use super::{GitRepo, GitSource};
+    use super::{GitRepo, GitSource, rewrite_clone_url};
     use crate::base_resolve::{ResolvedBase, RevisionResolver, resolve_base};
     use crate::base_ruleset::{BaseRuleset, parse_ruleset};
     use crate::identity::ScmType;
@@ -1966,6 +2053,103 @@ index HASHES
                 name: "origin".to_string(),
                 url: "git@github.com:octo/demo.git".to_string(),
             }]
+        );
+    }
+
+    /// A set of `url.<base>.insteadOf` rewrites in config order, including two
+    /// aliases sharing a base, one alias extending another, and a repeated alias.
+    fn alias_rewrites() -> Vec<(String, String)> {
+        [
+            ("octo:", "git@github.com:octo/"),
+            ("oc:", "git@github.com:octo/"),
+            ("octo:sub/", "ssh://longer.example/"),
+            ("gh:", "https://github.com/"),
+            ("gh:", "https://second.example/"),
+        ]
+        .into_iter()
+        .map(|(alias, base)| (alias.to_string(), base.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn rewrite_clone_url_expands_the_longest_matching_alias() {
+        let mapped: Vec<String> = [
+            "octo:demo.git",
+            "octo:sub/demo.git",
+            "oc:demo.git",
+            "gh:octo/demo.git",
+            "git@github.com:octo/demo.git",
+            "octo",
+        ]
+        .into_iter()
+        .map(|clone_url| {
+            format!(
+                "{clone_url} -> {}",
+                rewrite_clone_url(clone_url, &alias_rewrites())
+            )
+        })
+        .collect();
+        wince::assert_eq!(
+            mapped.join("\n"),
+            "octo:demo.git -> git@github.com:octo/demo.git\n\
+             octo:sub/demo.git -> ssh://longer.example/demo.git\n\
+             oc:demo.git -> git@github.com:octo/demo.git\n\
+             gh:octo/demo.git -> https://github.com/octo/demo.git\n\
+             git@github.com:octo/demo.git -> git@github.com:octo/demo.git\n\
+             octo -> octo"
+        );
+    }
+
+    #[test]
+    fn rewrite_clone_url_leaves_a_url_alone_when_nothing_is_configured() {
+        wince::assert_eq!(
+            rewrite_clone_url("git@github.com:octo/demo.git", &[]),
+            "git@github.com:octo/demo.git".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn remotes_expands_an_alias_a_url_rewrite_configures() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("home");
+        let (w, h) = (work.path(), home.path());
+        git(w, h, &["init", "-q", "-b", "main"]);
+        // The alias a `url.<base>.insteadOf` names is what a remote is
+        // configured with; on its own it names neither host nor repository, so
+        // it must come back expanded the way git would contact it.
+        git(
+            w,
+            h,
+            &["config", "url.git@github.com:octo/.insteadOf", "octo:"],
+        );
+        // An empty alias prefix-matches every URL; git ignores it, and so must
+        // the remote below.
+        git(
+            w,
+            h,
+            &["config", "url.ssh://ignored.example/.insteadOf", ""],
+        );
+        git(w, h, &["remote", "add", "origin", "octo:demo.git"]);
+        git(
+            w,
+            h,
+            &["remote", "add", "fork", "https://codeberg.org/me/demo.git"],
+        );
+
+        let repo = GitRepo::new(w);
+        let remotes = repo.remotes().await.expect("remotes");
+        wince::assert_eq!(
+            remotes,
+            vec![
+                Remote {
+                    name: "origin".to_string(),
+                    url: "git@github.com:octo/demo.git".to_string(),
+                },
+                Remote {
+                    name: "fork".to_string(),
+                    url: "https://codeberg.org/me/demo.git".to_string(),
+                },
+            ]
         );
     }
 

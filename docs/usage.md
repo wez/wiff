@@ -44,7 +44,9 @@ wiff forge pull https://github.com/wezterm/wezterm/pull/6185  # or by full URL
 ```
 
 Run `wiff forge pull 6185` from inside the repository and wiff works out which
-forge to talk to from your git remote, then fetches pull request 6185.
+forge to talk to from your git remote, then fetches pull request 6185. A remote
+configured through a `url.<base>.insteadOf` alias works too: wiff expands it the
+way git does, so `octo:demo.git` finds the same forge as the URL it stands for.
 
 You can also give a full pull-request URL. That names the forge outright, so it
 works from anywhere, even outside a repository with no working copy checked out:
