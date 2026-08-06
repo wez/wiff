@@ -1,10 +1,14 @@
-.PHONY: check build lint fmt test screencasts screencast-gif docs docs-serve
+.PHONY: check build dist lint fmt test screencasts screencast-gif docs docs-serve
 
 check:
 	cargo check --all-features
 
 build:
 	cargo build --all-features
+
+# Set TARGET to cross-compile, e.g. TARGET=x86_64-unknown-linux-musl.
+dist:
+	cargo build --profile dist --locked -p wiff --bin wiff $(if $(TARGET),--target $(TARGET))
 
 lint:
 	cargo clippy --all-features --all-targets -- -D warnings

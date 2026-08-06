@@ -1,0 +1,56 @@
+name: Binaries
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: continuous
+  cancel-in-progress: true
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete continuous --yes --cleanup-tag || true
+          gh release create continuous --prerelease --target "$GITHUB_SHA" \
+            --title continuous --notes "Built from main at $GITHUB_SHA."
+
+  binaries:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: wiff
+          package: wiff
+          target: ${{ matrix.target }}
+          profile: dist
+          locked: true
+          leading-dir: true
+          include: LICENSE,README.md
+          checksum: sha256
+          tar: none
+          tar-xz: unix
+          ref: refs/tags/continuous
+          token: ${{ secrets.GITHUB_TOKEN }}

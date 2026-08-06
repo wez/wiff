@@ -3,6 +3,23 @@
 wiff is written in Rust and builds with a recent stable toolchain. You do not
 need to clone the repository to install it.
 
+## Prebuilt binaries
+
+The rolling
+[`continuous`](https://github.com/wez/wiff/releases/tag/continuous) release is
+rebuilt from `main` on every commit. It attaches a
+`wiff-<target>.tar.xz` per platform, with a `.sha256` beside it; each archive
+holds the `wiff` binary, `LICENSE`, and `README.md`.
+
+| Platform | Target |
+| --- | --- |
+| Linux, x86_64 | `x86_64-unknown-linux-musl` |
+| Linux, arm64 | `aarch64-unknown-linux-musl` |
+| macOS, Apple silicon | `aarch64-apple-darwin` |
+| macOS, Intel | `x86_64-apple-darwin` |
+
+Linux builds are static. There is no Windows build.
+
 ## From git
 
 Install straight from the repository:

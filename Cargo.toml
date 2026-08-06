@@ -16,6 +16,13 @@ missing_docs = "deny"
 [workspace.lints.clippy]
 too_many_arguments = "deny"
 
+# Released binaries. Separate from `release` so `make screencasts` stays fast.
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"

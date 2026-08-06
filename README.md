@@ -13,8 +13,13 @@ skill) can read and write at the same time.
 
 ## Install
 
-Install straight from the git repository with a recent Rust toolchain, without
-cloning it first:
+Prebuilt binaries for Linux (static) and macOS, x86_64 and arm64, are attached
+to the rolling
+[`continuous`](https://github.com/wez/wiff/releases/tag/continuous) release,
+rebuilt from `main` on every commit.
+
+Or install straight from the git repository with a recent Rust toolchain,
+without cloning it first:
 
 ```bash
 cargo install --git https://github.com/wez/wiff.git wiff
