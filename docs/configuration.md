@@ -30,11 +30,14 @@ tab_width = 4
 wrap_lines = true
 # Show line numbers in the gutter on startup.
 show_line_numbers = true
+# The syntax theme; the rest of the interface takes its colors from it.
+theme = "wez"
 ```
 
 `display_context` is a display choice, independent of how much context the diff
-was captured with. `wrap_lines` and `show_line_numbers` are the startup values;
-the `toggle_wrap` and `toggle_line_numbers` actions flip them within a session.
+was captured with. `wrap_lines`, `show_line_numbers`, and `theme` are the
+startup values; `toggle_wrap`, `toggle_line_numbers`, and the `T` theme picker
+change them within a session.
 
 ### Layout
 

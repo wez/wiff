@@ -22,7 +22,7 @@ use wiff_diff::decode_text;
 use wiff_forge::{Forge, PushOutcome, ResyncOutcome, TokenOverride, push};
 use wiff_tui::{
     App, CommentSync, CompareRequest, DiffView, Exit, ExitDefault, HighlightMode, Hooks, KeyHints,
-    PublishStep, Review, Theme, run,
+    PublishStep, Review, run,
 };
 
 use crate::command::explore::to_slash;
@@ -61,7 +61,7 @@ pub fn open(
     let text = log.read_diff(version.number)?;
     let diff = parse_diff(&text, config.tab_width)?;
 
-    let theme = Theme::dark();
+    let theme = config.theme()?;
     let sections = wiff_diff::SectionMatchers::new(&config.section)
         .context("a configured section pattern is not a valid regex")?;
     let generated =

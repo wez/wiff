@@ -26,6 +26,7 @@ tab_width = 8
 editor = \"vim +{line} {file}\"
 wrap_lines = true
 show_line_numbers = false
+theme = \"InspiredGitHub\"
 diff_mode = \"side_by_side\"
 side_by_side_min_width = 160
 nudge_to_detach = false
@@ -68,6 +69,7 @@ quit = [\"q\", \"ctrl-c\"]
             editor: Some("vim +{line} {file}".to_string()),
             wrap_lines: true,
             show_line_numbers: false,
+            theme: "InspiredGitHub".to_string(),
             diff_mode: wiff_tui::render::DiffMode::SideBySide,
             side_by_side_min_width: 160,
             nudge_to_detach: false,
@@ -109,6 +111,7 @@ fn an_empty_config_is_all_defaults() {
     let config = Config::parse("").unwrap();
     wince::assert_eq!(config, Config::default());
     wince::assert_eq!(config.on_exit, OnExit::Prompt);
+    wince::assert_eq!(config.theme, "wez".to_string());
     wince::assert_eq!(
         config.author.resolve(AuthorKind::Human),
         Author {
@@ -140,6 +143,26 @@ fn the_configured_keymap_overlays_the_defaults() {
 }
 
 #[test]
+fn the_configured_theme_resolves_to_its_palette() {
+    let config = Config::parse("theme = \"InspiredGitHub\"\n").unwrap();
+    wince::assert_eq!(
+        config.theme().unwrap().syntax_theme,
+        "InspiredGitHub".to_string()
+    );
+}
+
+#[test]
+fn an_unknown_theme_is_rejected_and_names_the_bundled_ones() {
+    let config = Config::parse("theme = \"no such theme\"\n").unwrap();
+    let error = config.theme().unwrap_err().to_string();
+    wince::assert_eq!(
+        error.starts_with("unknown theme \"no such theme\"; the bundled themes are "),
+        true
+    );
+    wince::assert_eq!(error.contains("InspiredGitHub"), true);
+}
+
+#[test]
 fn an_unknown_field_is_rejected() {
     let error = Config::parse("wibble = true\n").unwrap_err();
     #[rustfmt::skip]
@@ -149,7 +172,7 @@ fn an_unknown_field_is_rejected() {
         "  |\n",
         "1 | wibble = true\n",
         "  | ^^^^^^\n",
-        "unknown field `wibble`, expected one of `on_exit`, `display_context`, `min_fold`, `tab_width`, `editor`, `wrap_lines`, `show_line_numbers`, `diff_mode`, `side_by_side_min_width`, `nudge_to_detach`, `author`, `base_revision_rules`, `forge`, `section`, `generated`, `disable_default_keymap`, `keymap`\n",
+        "unknown field `wibble`, expected one of `on_exit`, `display_context`, `min_fold`, `tab_width`, `editor`, `wrap_lines`, `show_line_numbers`, `theme`, `diff_mode`, `side_by_side_min_width`, `nudge_to_detach`, `author`, `base_revision_rules`, `forge`, `section`, `generated`, `disable_default_keymap`, `keymap`\n",
     );
 }
 

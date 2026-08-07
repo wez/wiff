@@ -13,12 +13,13 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use wiff_core::{AuthorDefaults, BaseRuleset, DEFAULT_BASE_REVISION_RULES};
 use wiff_diff::DEFAULT_TAB_WIDTH;
+use wiff_diff::highlight::{DEFAULT_DARK_THEME, theme_names};
 use wiff_forge::ForgeTable;
 use wiff_tui::keymap::Keymap;
 use wiff_tui::render::{
     DEFAULT_DISPLAY_CONTEXT, DEFAULT_MIN_FOLD, DEFAULT_SIDE_BY_SIDE_MIN_WIDTH, DiffMode,
 };
-use wiff_tui::{KeymapError, KeymapOverrides};
+use wiff_tui::{KeymapError, KeymapOverrides, Theme};
 
 /// The environment variable that overrides the config directory.
 pub const CONFIG_DIR_ENV: &str = "WIFF_CONFIG_DIR";
@@ -60,6 +61,8 @@ pub struct Config {
     /// Whether the gutter shows line numbers on startup. The
     /// `toggle_line_numbers` action flips it within a session.
     pub show_line_numbers: bool,
+    /// The syntax theme; the rest of the interface takes its colors from it.
+    pub theme: String,
     /// The starting diff layout: one column, two columns, or auto (two once the
     /// terminal is wide enough). The `diff_mode_*` actions switch it within a
     /// session.
@@ -105,6 +108,7 @@ impl Default for Config {
             editor: None,
             wrap_lines: true,
             show_line_numbers: true,
+            theme: DEFAULT_DARK_THEME.to_string(),
             diff_mode: DiffMode::default(),
             side_by_side_min_width: DEFAULT_SIDE_BY_SIDE_MIN_WIDTH,
             nudge_to_detach: true,
@@ -148,6 +152,13 @@ impl Config {
     /// overlaid with the configured overrides.
     pub fn keymap(&self) -> Result<Keymap, KeymapError> {
         Keymap::resolve_config(&self.keymap, self.disable_default_keymap)
+    }
+
+    /// Resolve `theme` to its palette.
+    pub fn theme(&self) -> Result<Theme, ConfigError> {
+        Theme::named(&self.theme).ok_or_else(|| ConfigError::UnknownTheme {
+            name: self.theme.clone(),
+        })
     }
 }
 
@@ -200,4 +211,10 @@ pub enum ConfigError {
     /// The config file was not valid TOML or had invalid values.
     #[error("could not parse config: {0}")]
     Parse(#[source] toml::de::Error),
+    /// The configured theme is not among the built-in themes.
+    #[error("unknown theme {name:?}; the bundled themes are {}", theme_names().join(", "))]
+    UnknownTheme {
+        /// The theme name that was not found.
+        name: String,
+    },
 }
