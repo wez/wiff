@@ -288,10 +288,10 @@ impl RevisionResolver for JjRepo {
         // jj 0.42+, it always resolves but defaults to the all-zeros root
         // commit when unconfigured rather than returning empty.  Treat the root
         // commit as "not configured" and fall back to well-known bookmark names.
-        if let Some(rev) = self.resolve_revset("trunk()").await? {
-            if rev.as_str() != JJ_ROOT_COMMIT {
-                return Ok(Some(rev));
-            }
+        if let Some(rev) = self.resolve_revset("trunk()").await?
+            && rev.as_str() != JJ_ROOT_COMMIT
+        {
+            return Ok(Some(rev));
         }
         for name in ["main", "master"] {
             if let Some(rev) = self.resolve_revset(name).await? {
