@@ -159,9 +159,16 @@ impl PushArgs {
             .await?;
         let mut log = SessionLog::open(&path)?;
         let author = resolve_author(self.agent, self.author)?;
-        let (resync, pushed) =
-            push_bound_review(forge.as_ref(), repo.as_ref(), identity.scm, &mut log, &root, &url, author)
-                .await?;
+        let (resync, pushed) = push_bound_review(
+            forge.as_ref(),
+            repo.as_ref(),
+            identity.scm,
+            &mut log,
+            &root,
+            &url,
+            author,
+        )
+        .await?;
         report_push(&url, &resync, &pushed);
         Ok(())
     }
@@ -242,8 +249,7 @@ async fn push_bound_review(
     url: &ForgeUrl,
     author: Author,
 ) -> anyhow::Result<(ResyncOutcome, PushOutcome)> {
-    let resync =
-        reconcile_before_push(forge, repo, scm, log, root, url, author.clone()).await?;
+    let resync = reconcile_before_push(forge, repo, scm, log, root, url, author.clone()).await?;
     let pushed = push(forge, log, url, &author).await?;
     Ok((resync, pushed))
 }

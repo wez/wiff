@@ -153,9 +153,8 @@ impl JjRepo {
                 )));
             }
         }
-        let text = String::from_utf8(output.stdout).map_err(|source| {
-            Error::Repo(format!("jj printed a non-UTF-8 revision: {source}"))
-        })?;
+        let text = String::from_utf8(output.stdout)
+            .map_err(|source| Error::Repo(format!("jj printed a non-UTF-8 revision: {source}")))?;
         // Take only the first non-empty line: a revset that matches several
         // commits (e.g. `parents()` on a merge) yields one hash per line.
         match text.lines().find(|l| !l.trim().is_empty()) {
@@ -194,9 +193,8 @@ impl JjRepo {
                 "separate(\"\\n\", local_bookmarks)",
             ])
             .await?;
-        let text = String::from_utf8(output.stdout).map_err(|source| {
-            Error::Repo(format!("jj printed a non-UTF-8 bookmark: {source}"))
-        })?;
+        let text = String::from_utf8(output.stdout)
+            .map_err(|source| Error::Repo(format!("jj printed a non-UTF-8 bookmark: {source}")))?;
         Ok(text
             .lines()
             .find(|l| !l.trim().is_empty())
@@ -207,7 +205,15 @@ impl JjRepo {
     async fn diff_working_copy(&self, base: &RevisionId) -> Result<String> {
         let context = format!("--context={JJ_CONTEXT_LINES}");
         let output = self
-            .jj(["diff", &context, "--from", base.as_str(), "--git", "--to", "@"])
+            .jj([
+                "diff",
+                &context,
+                "--from",
+                base.as_str(),
+                "--git",
+                "--to",
+                "@",
+            ])
             .await?;
         String::from_utf8(output.stdout)
             .map_err(|source| Error::Source(format!("jj diff was not valid UTF-8: {source}")))
@@ -218,7 +224,13 @@ impl JjRepo {
         let context = format!("--context={JJ_CONTEXT_LINES}");
         let output = self
             .jj([
-                "diff", &context, "--from", base.as_str(), "--git", "--to", tip.as_str(),
+                "diff",
+                &context,
+                "--from",
+                base.as_str(),
+                "--git",
+                "--to",
+                tip.as_str(),
             ])
             .await?;
         String::from_utf8(output.stdout)
@@ -342,7 +354,9 @@ impl RevisionResolver for JjRepo {
 #[async_trait]
 impl ScmRepo for JjRepo {
     async fn fetch_pinned(&self, source: &FetchSource, session: SessionId) -> Result<RevisionId> {
-        self.git_repo_for_forge()?.fetch_pinned(source, session).await
+        self.git_repo_for_forge()?
+            .fetch_pinned(source, session)
+            .await
     }
 
     async fn fetch_base(&self, source: &FetchSource, session: SessionId) -> Result<RevisionId> {
@@ -351,9 +365,8 @@ impl ScmRepo for JjRepo {
 
     async fn remotes(&self) -> Result<Vec<Remote>> {
         let output = self.jj(["git", "remote", "list"]).await?;
-        let text = String::from_utf8(output.stdout).map_err(|source| {
-            Error::Repo(format!("jj printed a non-UTF-8 remote: {source}"))
-        })?;
+        let text = String::from_utf8(output.stdout)
+            .map_err(|source| Error::Repo(format!("jj printed a non-UTF-8 remote: {source}")))?;
         let mut remotes = Vec::new();
         for line in text.lines() {
             let line = line.trim();
@@ -377,9 +390,8 @@ impl ScmRepo for JjRepo {
         // jj always commits the working copy into `@`; "clean" means `@` has
         // no changes relative to its parent, which `jj diff` shows as empty.
         let output = self.jj(["diff", "--git"]).await?;
-        let text = String::from_utf8(output.stdout).map_err(|source| {
-            Error::Repo(format!("jj printed a non-UTF-8 diff: {source}"))
-        })?;
+        let text = String::from_utf8(output.stdout)
+            .map_err(|source| Error::Repo(format!("jj printed a non-UTF-8 diff: {source}")))?;
         Ok(text.trim().is_empty())
     }
 
@@ -481,9 +493,10 @@ impl JjSource {
             TipRule::Ref { name: change }
         } else {
             // A bare commit hash or other expression is resolved and pinned.
-            let revision = repo.resolve_revset(&change).await?.ok_or_else(|| {
-                Error::Source(format!("'{change}' did not resolve to a commit"))
-            })?;
+            let revision = repo
+                .resolve_revset(&change)
+                .await?
+                .ok_or_else(|| Error::Source(format!("'{change}' did not resolve to a commit")))?;
             TipRule::Pinned { revision }
         };
         Ok(Self { repo, base, tip })
@@ -521,13 +534,11 @@ impl JjSource {
                 .resolve_revset(name)
                 .await?
                 .ok_or_else(|| Error::Source(format!("'{name}' did not resolve to a commit"))),
-            TipRule::ChangeId { id } => self
-                .repo
-                .resolve_revset(id.as_str())
-                .await?
-                .ok_or_else(|| {
+            TipRule::ChangeId { id } => {
+                self.repo.resolve_revset(id.as_str()).await?.ok_or_else(|| {
                     Error::Source(format!("change '{id}' did not resolve to a commit"))
-                }),
+                })
+            }
             TipRule::Pinned { revision } => self
                 .repo
                 .resolve_revset(revision.as_str())
@@ -566,10 +577,7 @@ impl DiffSource for JjSource {
         let (text, head_revision) = match &self.tip {
             TipRule::WorkingCopy => (self.repo.diff_working_copy(&base).await?, None),
             TipRule::Index => unreachable!("Index is rejected in resolve_tip"),
-            _ => (
-                self.repo.diff_range(&base, &tip).await?,
-                Some(tip.clone()),
-            ),
+            _ => (self.repo.diff_range(&base, &tip).await?, Some(tip.clone())),
         };
         let branch_hint = match &self.tip {
             TipRule::WorkingCopy => self
@@ -774,14 +782,10 @@ index HASHES
     async fn a_staged_tip_is_rejected_with_a_clear_error() {
         let repo = tempfile::tempdir().expect("tempdir");
         jj_init(repo.path());
-        let error = JjSource::revision(
-            repo.path(),
-            BaseRuleset::empty(),
-            TipRule::Index,
-        )
-        .capture()
-        .await
-        .expect_err("Index must be rejected");
+        let error = JjSource::revision(repo.path(), BaseRuleset::empty(), TipRule::Index)
+            .capture()
+            .await
+            .expect_err("Index must be rejected");
         assert!(
             error.to_string().contains("jj has no staging area"),
             "unexpected error: {error}"
@@ -812,7 +816,11 @@ index HASHES
             "trunk() should resolve to root commit (all zeros) when unconfigured"
         );
         let trunk = jj_repo.trunk().await.expect("trunk");
-        assert_eq!(trunk, Some(main_sha), "trunk should resolve via 'main' bookmark");
+        assert_eq!(
+            trunk,
+            Some(main_sha),
+            "trunk should resolve via 'main' bookmark"
+        );
     }
 
     #[tokio::test]
@@ -821,9 +829,6 @@ index HASHES
         jj_init(repo.path());
         let jj_repo = JjRepo::new(repo.path());
         let empty = jj_repo.empty().await.expect("empty");
-        assert_eq!(
-            empty,
-            Some(RevisionId(JJ_EMPTY_TREE_SHA1.to_string()))
-        );
+        assert_eq!(empty, Some(RevisionId(JJ_EMPTY_TREE_SHA1.to_string())));
     }
 }

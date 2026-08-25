@@ -149,9 +149,7 @@ pub(crate) async fn capture_scm_diff(
 ) -> anyhow::Result<CapturedDiff> {
     let captured = match scm {
         Some(ScmType::Git) => git_source(root, selection, base).await?.capture().await?,
-        Some(ScmType::Jujutsu) => {
-            jj_source(root, selection, base).await?.capture().await?
-        }
+        Some(ScmType::Jujutsu) => jj_source(root, selection, base).await?.capture().await?,
         Some(other) => bail!(
             "{} is a {other} repository, which wiff cannot capture from yet; pipe a unified diff on stdin instead",
             root.display()
@@ -326,9 +324,9 @@ pub(crate) async fn recapture_diff(state: &ReviewState) -> anyhow::Result<Option
         ScmType::Jujutsu => {
             let source = match tip {
                 TipRule::WorkingCopy => JjSource::working_copy(root, base),
-                TipRule::Index => bail!(
-                    "jj has no staging area; use `wiff new` without `--cached`"
-                ),
+                TipRule::Index => {
+                    bail!("jj has no staging area; use `wiff new` without `--cached`")
+                }
                 other => JjSource::revision(root, base, other),
             };
             source.capture().await?
