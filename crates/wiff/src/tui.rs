@@ -15,8 +15,9 @@ use wiff_core::record::{
 use wiff_core::session::{SessionWatcher, read_records, remove_session, session_binding};
 use wiff_core::source::ScmRepo;
 use wiff_core::{
-    AnchorFailures, CapturedDiff, LockWait, RefreshOutcome, ReviewState, SessionLog, SidebandHash,
-    capture_draft_anchors, compare_versions, explore_file_set, refresh_session, widen_explore,
+    AnchorFailures, CapturedDiff, LockWait, RefreshOutcome, ReviewState, ScmType, SessionLog,
+    SidebandHash, capture_draft_anchors, compare_versions, explore_file_set, refresh_session,
+    widen_explore,
 };
 use wiff_diff::decode_text;
 use wiff_forge::{Forge, PushOutcome, ResyncOutcome, TokenOverride, push};
@@ -515,6 +516,7 @@ impl ForgeReviewAction {
 struct ForgeReview {
     url: ForgeUrl,
     root: PathBuf,
+    scm: Option<ScmType>,
     repo: Box<dyn ScmRepo>,
     forge: Box<dyn Forge>,
 }
@@ -549,6 +551,7 @@ fn resolve_forge_review(
     Ok(ForgeReview {
         url,
         root,
+        scm,
         repo,
         forge,
     })
@@ -570,6 +573,7 @@ fn refresh_forge_in_place(
     let ForgeReview {
         url,
         root,
+        scm,
         repo,
         forge,
     } = resolve_forge_review(session_path, connect, ForgeReviewAction::Refresh)?;
@@ -577,6 +581,7 @@ fn refresh_forge_in_place(
     let outcome = block_on(reconcile_before_push(
         forge.as_ref(),
         repo.as_ref(),
+        scm,
         &mut log,
         &root,
         &url,
@@ -617,6 +622,7 @@ fn publish_reconcile_in_place(
     let ForgeReview {
         url,
         root,
+        scm,
         repo,
         forge,
     } = resolve_forge_review(session_path, connect, ForgeReviewAction::Publish)?;
@@ -637,6 +643,7 @@ fn publish_reconcile_in_place(
     let outcome = block_on(reconcile_before_push(
         forge.as_ref(),
         repo.as_ref(),
+        scm,
         &mut log,
         &root,
         &url,

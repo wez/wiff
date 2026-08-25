@@ -15,7 +15,10 @@ use wiff_core::session::{
     session_file,
 };
 use wiff_core::source::CapturedDiff;
-use wiff_core::{BaseRuleset, GitSource, ProjectIdentity, ScmRepo, SessionId, SessionLog};
+use wiff_core::{
+    BaseRuleset, DiffSource, GitSource, JjSource, ProjectIdentity, ScmRepo, ScmType, SessionId,
+    SessionLog,
+};
 use wiff_forge::{
     DeclinedWrite, FetchedPullRequest, Forge, GithubForge, ImportRequest, PushOutcome,
     ResyncOutcome, TokenOverride, assemble_diff, import_pull_request, push, resolve_token,
@@ -157,7 +160,8 @@ impl PushArgs {
         let mut log = SessionLog::open(&path)?;
         let author = resolve_author(self.agent, self.author)?;
         let (resync, pushed) =
-            push_bound_review(forge.as_ref(), repo.as_ref(), &mut log, &root, &url, author).await?;
+            push_bound_review(forge.as_ref(), repo.as_ref(), identity.scm, &mut log, &root, &url, author)
+                .await?;
         report_push(&url, &resync, &pushed);
         Ok(())
     }
@@ -232,12 +236,14 @@ impl PushArgs {
 async fn push_bound_review(
     forge: &dyn Forge,
     repo: &dyn ScmRepo,
+    scm: Option<ScmType>,
     log: &mut SessionLog,
     root: &Path,
     url: &ForgeUrl,
     author: Author,
 ) -> anyhow::Result<(ResyncOutcome, PushOutcome)> {
-    let resync = reconcile_before_push(forge, repo, log, root, url, author.clone()).await?;
+    let resync =
+        reconcile_before_push(forge, repo, scm, log, root, url, author.clone()).await?;
     let pushed = push(forge, log, url, &author).await?;
     Ok((resync, pushed))
 }
@@ -250,14 +256,15 @@ async fn push_bound_review(
 pub(crate) async fn reconcile_before_push(
     forge: &dyn Forge,
     repo: &dyn ScmRepo,
+    scm: Option<ScmType>,
     log: &mut SessionLog,
     root: &Path,
     url: &ForgeUrl,
     author: Author,
 ) -> anyhow::Result<ResyncOutcome> {
     let fetched = forge.fetch(url).await?;
-    let source = prepare_source(repo, root, &fetched, log.id()).await?;
-    resync_pull_request(log, &source, &fetched, author).await
+    let source = prepare_source(repo, scm, root, &fetched, log.id()).await?;
+    resync_pull_request(log, source.as_ref(), &fetched, author).await
 }
 
 /// Print what pushing to `url` did: first what its pull-first step reconciled
@@ -459,20 +466,22 @@ async fn mirror_into_repo(
     match existing {
         Some(path) => {
             let mut log = SessionLog::open(&path)?;
-            let source = prepare_source(repo.as_ref(), &root, &fetched, log.id()).await?;
-            resync_pull_request(&mut log, &source, &fetched, author).await?;
+            let source =
+                prepare_source(repo.as_ref(), identity.scm, &root, &fetched, log.id()).await?;
+            resync_pull_request(&mut log, source.as_ref(), &fetched, author).await?;
             Ok(path)
         }
         None => {
             let session = SessionId::new();
-            let source = prepare_source(repo.as_ref(), &root, &fetched, session).await?;
+            let source =
+                prepare_source(repo.as_ref(), identity.scm, &root, &fetched, session).await?;
             let request = ImportRequest {
                 session,
                 base,
                 identity: &identity,
                 cwd,
             };
-            import_pull_request(&source, &fetched, &request).await?;
+            import_pull_request(source.as_ref(), &fetched, &request).await?;
             Ok(session_file(base, &identity.canonical, session))
         }
     }
@@ -543,21 +552,24 @@ async fn forge_diff_source(
 /// fork point it is no longer reachable from the head.
 async fn prepare_source(
     repo: &dyn ScmRepo,
+    scm: Option<ScmType>,
     root: &Path,
     fetched: &FetchedPullRequest,
     session: SessionId,
-) -> anyhow::Result<GitSource> {
+) -> anyhow::Result<Box<dyn DiffSource>> {
     let head = repo.fetch_pinned(&fetched.head, session).await?;
     repo.fetch_base(&fetched.base, session).await?;
     let base = BaseRuleset::new(format!(
         "merge-base(name({}))",
         fetched.base_commit().as_str()
     ));
-    Ok(GitSource::revision(
-        root.to_path_buf(),
-        base,
-        TipRule::Pinned { revision: head },
-    ))
+    let tip = TipRule::Pinned { revision: head };
+    // At this point scm is always Git or Jujutsu: forge operations require a
+    // recognised SCM and fail earlier (in scm_repo) for anything else.
+    Ok(match scm {
+        Some(ScmType::Jujutsu) => Box::new(JjSource::revision(root.to_path_buf(), base, tip)),
+        _ => Box::new(GitSource::revision(root.to_path_buf(), base, tip)),
+    })
 }
 
 /// Build the forge adapter for `host`: look it up in the effective forge table,
@@ -1513,6 +1525,7 @@ mod tests {
         let (_resync, outcome) = push_bound_review(
             &forge,
             repo.as_ref(),
+            Some(ScmType::Git),
             &mut log,
             work.path(),
             &url,

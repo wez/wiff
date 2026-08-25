@@ -26,8 +26,8 @@ use wiff_core::review::ReviewState;
 use wiff_core::session::{active_session, data_dir, resolve_session_id, session_file};
 use wiff_core::source::{GitRepo, HeadBranch, ScmRepo, head_branch};
 use wiff_core::{
-    BaseRuleset, CapturedDiff, DiffSource, GitSource, ProjectIdentity, ScmType, capture_explore,
-    explore_file_set,
+    BaseRuleset, CapturedDiff, DiffSource, GitSource, JjRepo, JjSource, ProjectIdentity, ScmType,
+    capture_explore, explore_file_set,
 };
 
 use self::comment::CommentArgs;
@@ -147,8 +147,11 @@ pub(crate) async fn capture_scm_diff(
     selection: DiffSelection,
     base: Option<BaseRuleset>,
 ) -> anyhow::Result<CapturedDiff> {
-    let source = match scm {
-        Some(ScmType::Git) => git_source(root, selection, base).await?,
+    let captured = match scm {
+        Some(ScmType::Git) => git_source(root, selection, base).await?.capture().await?,
+        Some(ScmType::Jujutsu) => {
+            jj_source(root, selection, base).await?.capture().await?
+        }
         Some(other) => bail!(
             "{} is a {other} repository, which wiff cannot capture from yet; pipe a unified diff on stdin instead",
             root.display()
@@ -158,7 +161,7 @@ pub(crate) async fn capture_scm_diff(
             root.display()
         ),
     };
-    Ok(source.capture().await?)
+    Ok(captured)
 }
 
 /// A handle to the repository at `root` for the forge operations [`ScmRepo`]
@@ -169,6 +172,7 @@ pub(crate) async fn capture_scm_diff(
 pub(crate) fn scm_repo(scm: Option<ScmType>, root: PathBuf) -> anyhow::Result<Box<dyn ScmRepo>> {
     match scm {
         Some(ScmType::Git) => Ok(Box::new(GitRepo::new(root))),
+        Some(ScmType::Jujutsu) => Ok(Box::new(JjRepo::new(root))),
         Some(other) => bail!(
             "{} is a {other} repository, which wiff cannot drive yet",
             root.display()
@@ -188,11 +192,11 @@ async fn git_source(
 ) -> anyhow::Result<GitSource> {
     Ok(match selection {
         DiffSelection::WorkingCopy => {
-            let base = pinned_or(base, &root).await?;
+            let base = git_pinned_or(base, &root).await?;
             GitSource::working_copy(root, base)
         }
         DiffSelection::Staged => {
-            let base = pinned_or(base, &root).await?;
+            let base = git_pinned_or(base, &root).await?;
             GitSource::index(root, base)
         }
         DiffSelection::Change(change) => {
@@ -206,12 +210,43 @@ async fn git_source(
     })
 }
 
-/// The explicit `base`, or the ruleset pinning the review at the repository's
-/// current commit when none was given.
-async fn pinned_or(base: Option<BaseRuleset>, root: &Path) -> anyhow::Result<BaseRuleset> {
+/// Build the jj source for `selection`.  An explicit `base` overrides the
+/// default: a working-copy review otherwise pins its base at `@-`, while a
+/// named change reviews against its first parent.  jj has no staging area, so
+/// `Staged` is rejected with a clear error.
+async fn jj_source(
+    root: PathBuf,
+    selection: DiffSelection,
+    base: Option<BaseRuleset>,
+) -> anyhow::Result<JjSource> {
+    Ok(match selection {
+        DiffSelection::WorkingCopy => {
+            let base = jj_pinned_or(base, &root).await?;
+            JjSource::working_copy(root, base)
+        }
+        DiffSelection::Staged => {
+            bail!("jj has no staging area; use `wiff new` without `--cached`")
+        }
+        DiffSelection::Change(change) => {
+            let base = base.unwrap_or_else(|| BaseRuleset::new("parent(@)"));
+            JjSource::change(root, base, change).await?
+        }
+    })
+}
+
+/// The explicit `base`, or the git ruleset pinning the review at HEAD.
+async fn git_pinned_or(base: Option<BaseRuleset>, root: &Path) -> anyhow::Result<BaseRuleset> {
     match base {
         Some(base) => Ok(base),
         None => Ok(GitSource::pinned_base_at_head(root.to_path_buf()).await?),
+    }
+}
+
+/// The explicit `base`, or the jj ruleset pinning the review at `@-`.
+async fn jj_pinned_or(base: Option<BaseRuleset>, root: &Path) -> anyhow::Result<BaseRuleset> {
+    match base {
+        Some(base) => Ok(base),
+        None => Ok(JjSource::pinned_base_at_head(root.to_path_buf()).await?),
     }
 }
 
@@ -243,8 +278,9 @@ pub(crate) async fn recapture_diff(state: &ReviewState) -> anyhow::Result<Option
         .repo_root
         .clone()
         .context("the session records no repository root, so its diff cannot be recaptured")?;
-    if scm != ScmType::Git {
-        bail!("wiff cannot yet recapture a {scm} session");
+    match scm {
+        ScmType::Git | ScmType::Jujutsu => {}
+        other => bail!("wiff cannot yet recapture a {other} session"),
     }
     // A working-tree or index recapture reads whatever the repository root has
     // checked out now. The pinned base was chosen against the branch the session
@@ -259,14 +295,10 @@ pub(crate) async fn recapture_diff(state: &ReviewState) -> anyhow::Result<Option
         match head_branch(Path::new(&root), scm) {
             HeadBranch::On(now) if branch_hint.as_deref() == Some(now.as_str()) => {}
             HeadBranch::Detached if branch_hint.is_none() => {}
-            // A git that cannot be reached leaves the branch unknown; refusing
-            // with an honest report is safer than recapturing against a working
-            // tree we could not confirm, and avoids misreporting the fault as a
-            // detached head.
             HeadBranch::Unknown => bail!(
                 "wiff could not determine which branch the working copy is on \
-                 (is git installed, and is this a git repository?). Try again \
-                 once git is reachable."
+                 (is the scm installed, and is this a valid repository?). Try again \
+                 once the scm is reachable."
             ),
             HeadBranch::On(now) => {
                 return Err(branch_context_moved(
@@ -282,12 +314,28 @@ pub(crate) async fn recapture_diff(state: &ReviewState) -> anyhow::Result<Option
             }
         }
     }
-    let source = match tip {
-        TipRule::WorkingCopy => GitSource::working_copy(root, base),
-        TipRule::Index => GitSource::index(root, base),
-        other => GitSource::revision(root, base, other),
+    let captured = match scm {
+        ScmType::Git => {
+            let source = match tip {
+                TipRule::WorkingCopy => GitSource::working_copy(root, base),
+                TipRule::Index => GitSource::index(root, base),
+                other => GitSource::revision(root, base, other),
+            };
+            source.capture().await?
+        }
+        ScmType::Jujutsu => {
+            let source = match tip {
+                TipRule::WorkingCopy => JjSource::working_copy(root, base),
+                TipRule::Index => bail!(
+                    "jj has no staging area; use `wiff new` without `--cached`"
+                ),
+                other => JjSource::revision(root, base, other),
+            };
+            source.capture().await?
+        }
+        // Already rejected above.
+        other => bail!("wiff cannot yet recapture a {other} session"),
     };
-    let captured = source.capture().await?;
     Ok(Some(captured))
 }
 

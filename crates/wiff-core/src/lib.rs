@@ -52,6 +52,6 @@ pub use session::{LockWait, ProjectLock, SessionLock, SessionLog};
 pub use session_id::SessionId;
 pub use short_id::ShortId;
 pub use source::{
-    CapturedDiff, DiffSource, ExploreCapture, FetchSource, GitSource, Remote, ScmRepo, SkipReason,
-    TrackingBranch, capture_explore,
+    CapturedDiff, DiffSource, ExploreCapture, FetchSource, GitSource, JjRepo, JjSource, Remote,
+    ScmRepo, SkipReason, TrackingBranch, capture_explore,
 };

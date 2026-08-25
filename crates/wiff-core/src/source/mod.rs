@@ -11,6 +11,7 @@
 
 pub mod explore;
 pub mod git;
+pub mod jj;
 
 use std::path::Path;
 
@@ -23,6 +24,7 @@ use crate::session_id::SessionId;
 
 pub use explore::{ExploreCapture, SkipReason, capture_explore};
 pub use git::{GitRepo, GitSource};
+pub use jj::{JjRepo, JjSource};
 
 /// The checked-out branch of a repository, distinguishing a real detached head
 /// from a transient failure to reach the scm. A detached head is a repository
@@ -39,12 +41,13 @@ pub enum HeadBranch {
     Unknown,
 }
 
-/// The branch state of the repository at `repo_root`. Any scm other than git,
-/// which has no such notion here, reports [`HeadBranch::Unknown`].
+/// The branch state of the repository at `repo_root`. SCMs that have no
+/// branch concept (Mercurial, Sapling) report [`HeadBranch::Unknown`].
 pub fn head_branch(repo_root: &Path, scm: ScmType) -> HeadBranch {
     match scm {
         ScmType::Git => git::head_branch(repo_root),
-        ScmType::Jujutsu | ScmType::Sapling | ScmType::Mercurial => HeadBranch::Unknown,
+        ScmType::Jujutsu => jj::head_branch(repo_root),
+        ScmType::Sapling | ScmType::Mercurial => HeadBranch::Unknown,
     }
 }
 
