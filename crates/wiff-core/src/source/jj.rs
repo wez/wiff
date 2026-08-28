@@ -24,10 +24,6 @@ use crate::source::{
 /// diffs from both SCMs have the same neighborhood width.
 const JJ_CONTEXT_LINES: u32 = 3000;
 
-/// The SHA1 of the empty git tree.  jj always uses a git SHA1 object store, so
-/// this constant is the universal empty-tree base for any jj repository.
-const JJ_EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 /// jj's virtual root commit ID (all zeros).  In jj 0.42+, `trunk()` resolves
 /// to this when no trunk is configured rather than returning empty; see
 /// <https://jj-vcs.github.io/jj/latest/revsets/#built-in-functions> for the
@@ -132,9 +128,17 @@ impl JjRepo {
     }
 
     /// Run a jj query that prints one commit hash per line, returning the
-    /// first.  A nonzero exit that represents "nothing matched" (typically exit
-    /// 1 from `jj log -r <empty revset>`) yields `Ok(None)`; any other
-    /// nonzero exit is a genuine jj failure.
+    /// first.  A nonzero exit that represents "nothing matched" yields
+    /// `Ok(None)`; any other nonzero exit is a genuine jj failure.
+    ///
+    /// Caveat: jj uses exit code 1 for both "revset matched nothing" and
+    /// "revset failed to parse", so a malformed revset is silently treated as
+    /// `Ok(None)` rather than an error.  There is no clean flag-based way to
+    /// distinguish the two; the stderr text differs ("Failed to parse revset"
+    /// vs "doesn't exist") but inspecting it is fragile.  Callers that
+    /// construct revsets programmatically (e.g. `bookmarks(exact:"...")`)
+    /// should use forms that are always syntactically valid so a logic error
+    /// surfaces as a missing result rather than a silent wrong answer.
     async fn rev_query(&self, args: &[OsString]) -> Result<Option<RevisionId>> {
         let output = self.spawn(args).await?;
         match output.status.code() {
@@ -322,7 +326,7 @@ impl RevisionResolver for JjRepo {
             .await?
         {
             Some(parent) => Ok(Some(parent)),
-            // A root commit has no parent; fall back to the empty tree.
+            // A root commit has no parent; fall back to jj's virtual root.
             None => self.empty().await,
         }
     }
@@ -347,7 +351,10 @@ impl RevisionResolver for JjRepo {
     }
 
     async fn empty(&self) -> Result<Option<RevisionId>> {
-        Ok(Some(RevisionId(JJ_EMPTY_TREE_SHA1.to_string())))
+        // jj's all-zeros root commit is the correct "before everything" base:
+        // `jj diff --from 0000...0000 --to @` works, while the git empty-tree
+        // SHA1 (a tree object, not a commit) does not resolve in jj revsets.
+        Ok(Some(RevisionId(JJ_ROOT_COMMIT.to_string())))
     }
 }
 
@@ -420,10 +427,12 @@ impl ScmRepo for JjRepo {
     }
 
     async fn publish_branch(&self, remote: &str, branch: &str, commit: &RevisionId) -> Result<()> {
-        // Validate colocated repo early so the user gets a clear error rather
-        // than a cryptic "jj git push failed" when there is no git backend.
-        let git = self.git_repo_for_forge()?;
-        drop(git);
+        // git_repo_for_forge errors when .git is absent (i.e. the repo is not
+        // colocated).  Propagating that error with `?` here surfaces the
+        // problem with a clear message before any jj subprocess runs, rather
+        // than letting the user see a cryptic "jj git push failed".  The
+        // GitRepo handle itself is not needed; only the check matters.
+        let _ = self.git_repo_for_forge()?;
         self.jj(["bookmark", "set", branch, "-r", commit.as_str()])
             .await?;
         self.jj(["git", "push", "-b", branch, "--remote", remote])
@@ -469,28 +478,40 @@ impl JjSource {
 
     /// Build a source reviewing `change` against `base`.  A `change` that
     /// names a local bookmark is tracked as a [`Ref`](TipRule::Ref) tip; a
-    /// jj change ID (all-lowercase letters) is held as a
+    /// jj change ID (all-lowercase letters, no digits) is held as a
     /// [`ChangeId`](TipRule::ChangeId); anything else is resolved to a commit
-    /// and held as a [`Pinned`](TipRule::Pinned) tip.  Errors when `change`
-    /// resolves to no commit.
+    /// and held as a [`Pinned`](TipRule::Pinned) tip.  Bookmark existence is
+    /// checked before the change-ID heuristic so that all-lowercase bookmark
+    /// names like `master` or `develop` are not misclassified.  Errors when
+    /// `change` resolves to no commit.
     pub async fn change(
         repo_root: impl Into<PathBuf>,
         base: BaseRuleset,
         change: String,
     ) -> Result<Self> {
         let repo = JjRepo::new(repo_root);
-        let tip = if looks_like_change_id(&change) {
+        let tip = if repo
+            .resolve_revset(&format!(
+                "bookmarks(exact:\"{}\")",
+                // jj bookmark names cannot contain `"` or `\`, so this
+                // escaping is complete for all reachable inputs.
+                change.replace('"', "\\\"")
+            ))
+            .await?
+            .is_some()
+        {
+            // Storing the name as TipRule::Ref lets it re-resolve to the
+            // bookmark's current commit on every wiff recapture.  Note that
+            // detection uses `bookmarks(exact:"...")` while `resolve_tip` for
+            // `TipRule::Ref` re-resolves the bare name as a generic revset;
+            // these are equivalent for real bookmark names but are different
+            // code paths.
+            TipRule::Ref { name: change }
+        } else if looks_like_change_id(&change) {
             // A jj change ID tracks the logical change across rewrites.
             TipRule::ChangeId {
                 id: ChangeId(change),
             }
-        } else if repo
-            .resolve_revset(&format!("exact:\"{}\"", change.replace('"', "\\\"")))
-            .await?
-            .is_some()
-        {
-            // An exact bookmark name re-resolves on every refresh.
-            TipRule::Ref { name: change }
         } else {
             // A bare commit hash or other expression is resolved and pinned.
             let revision = repo
@@ -824,11 +845,145 @@ index HASHES
     }
 
     #[tokio::test]
-    async fn empty_returns_the_well_known_sha1() {
+    async fn empty_returns_the_jj_root_commit() {
         let repo = tempfile::tempdir().expect("tempdir");
         jj_init(repo.path());
         let jj_repo = JjRepo::new(repo.path());
         let empty = jj_repo.empty().await.expect("empty");
-        assert_eq!(empty, Some(RevisionId(JJ_EMPTY_TREE_SHA1.to_string())));
+        assert_eq!(empty, Some(RevisionId(JJ_ROOT_COMMIT.to_string())));
+    }
+
+    #[tokio::test]
+    async fn working_copy_in_a_root_only_repo_captures_the_diff() {
+        // The very first change in a fresh repo: @- is the virtual root commit,
+        // so pinned_base_at_head falls back to BaseRuleset::empty(), which must
+        // resolve to JJ_ROOT_COMMIT (not the git empty-tree SHA1, which jj
+        // cannot diff from).
+        let repo = tempfile::tempdir().expect("tempdir");
+        jj_init(repo.path());
+        std::fs::write(repo.path().join("f.txt"), "hello\n").expect("write");
+        let base = JjSource::pinned_base_at_head(repo.path())
+            .await
+            .expect("base");
+        let captured = JjSource::working_copy(repo.path(), base)
+            .capture()
+            .await
+            .expect("capture");
+        assert!(captured.text.contains("+hello"), "expected diff output");
+        assert_eq!(
+            captured.base_revision,
+            Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn change_with_a_bookmark_name_records_a_ref_tip() {
+        // Bookmark names that pass the change-id heuristic (all lowercase, >=5
+        // chars) must not be misclassified — bookmark existence takes priority.
+        let repo = tempfile::tempdir().expect("tempdir");
+        jj_init(repo.path());
+        std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
+        jj(repo.path(), &["new", "-m", "first"]);
+        // "master" passes looks_like_change_id but is a bookmark.
+        jj(repo.path(), &["bookmark", "set", "master", "-r", "@-"]);
+        let source = JjSource::change(
+            repo.path(),
+            BaseRuleset::new("parent(@)"),
+            "master".to_string(),
+        )
+        .await
+        .expect("change");
+        assert!(
+            matches!(source.tip, TipRule::Ref { ref name } if name == "master"),
+            "expected TipRule::Ref, got {:?}",
+            source.tip
+        );
+        // Capture through the Ref tip exercises resolve_tip's Ref arm, which
+        // was previously dead code (the old exact:"..." detection always
+        // returned None).
+        let captured = source.capture().await.expect("capture through Ref tip");
+        assert!(captured.text.contains("+alpha"), "expected diff output");
+    }
+
+    #[tokio::test]
+    async fn change_with_a_change_id_records_a_change_id_tip() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        jj_init(repo.path());
+        std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
+        jj(repo.path(), &["new", "-m", "first"]);
+        // Record the change ID of @- (the "first" commit).
+        let change_id = jj_out(
+            repo.path(),
+            &["log", "-r", "@-", "--no-graph", "-T", "change_id"],
+        );
+        // Change IDs are all-lowercase letters — they pass looks_like_change_id.
+        assert!(
+            looks_like_change_id(&change_id),
+            "jj change id should pass heuristic"
+        );
+        let source = JjSource::change(
+            repo.path(),
+            BaseRuleset::new("parent(@)"),
+            change_id.clone(),
+        )
+        .await
+        .expect("change");
+        assert!(
+            matches!(source.tip, TipRule::ChangeId { ref id } if id.as_str() == change_id),
+            "expected TipRule::ChangeId, got {:?}",
+            source.tip
+        );
+        // Capture through the ChangeId tip to exercise resolve_tip's ChangeId arm.
+        let captured = source
+            .capture()
+            .await
+            .expect("capture through ChangeId tip");
+        assert!(captured.text.contains("+alpha"), "expected diff output");
+    }
+
+    #[tokio::test]
+    async fn change_with_a_commit_hash_records_a_pinned_tip() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        jj_init(repo.path());
+        std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
+        jj(repo.path(), &["new", "-m", "first"]);
+        let commit_sha = jj_out(
+            repo.path(),
+            &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+        );
+        let source = JjSource::change(
+            repo.path(),
+            BaseRuleset::new("parent(@)"),
+            commit_sha.clone(),
+        )
+        .await
+        .expect("change");
+        assert!(
+            matches!(source.tip, TipRule::Pinned { ref revision } if revision.as_str() == commit_sha),
+            "expected TipRule::Pinned, got {:?}",
+            source.tip
+        );
+        let captured = source.capture().await.expect("capture through Pinned tip");
+        assert!(captured.text.contains("+alpha"), "expected diff output");
+    }
+
+    #[tokio::test]
+    async fn forge_operations_fail_with_a_clear_error_on_non_colocated_repos() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        jj_init(repo.path());
+        // Simulate a non-colocated workspace by removing the .git directory
+        // that jj git init --colocate creates. git_repo_for_forge checks for
+        // .git existence and must return a clear error rather than a cryptic
+        // jj failure when it is absent.
+        std::fs::remove_dir_all(repo.path().join(".git")).expect("remove .git");
+        let jj_repo = JjRepo::new(repo.path());
+        let err = jj_repo
+            .publish_branch("origin", "main", &RevisionId("0".repeat(40)))
+            .await
+            .expect_err("should fail without .git");
+        assert!(
+            err.to_string().contains("colocated"),
+            "expected colocation error, got: {err}"
+        );
     }
 }
