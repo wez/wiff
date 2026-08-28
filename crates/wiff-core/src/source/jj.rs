@@ -879,13 +879,19 @@ index HASHES
     #[tokio::test]
     async fn change_with_a_bookmark_name_records_a_ref_tip() {
         // Bookmark names that pass the change-id heuristic (all lowercase, >=5
-        // chars) must not be misclassified — bookmark existence takes priority.
+        // chars) must not be misclassified; bookmark existence takes priority.
         let repo = tempfile::tempdir().expect("tempdir");
         jj_init(repo.path());
         std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
         jj(repo.path(), &["new", "-m", "first"]);
         // "master" passes looks_like_change_id but is a bookmark.
         jj(repo.path(), &["bookmark", "set", "master", "-r", "@-"]);
+        let head = RevisionId(jj_out(
+            repo.path(),
+            &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+        ));
+        // `@` in parent(@) is the tip-under-review (master = @-), not the jj
+        // working copy.  parent(master) = the virtual root commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -903,6 +909,48 @@ index HASHES
         // returned None).
         let captured = source.capture().await.expect("capture through Ref tip");
         assert!(captured.text.contains("+alpha"), "expected diff output");
+        assert_eq!(captured.head_revision, Some(head));
+        assert_eq!(
+            captured.base_revision,
+            Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
+        );
+        assert!(captured.base_tip_relative);
+    }
+
+    #[tokio::test]
+    async fn change_with_a_non_heuristic_bookmark_name_records_a_ref_tip() {
+        // Bookmarks whose names do NOT pass looks_like_change_id (e.g. because
+        // they contain a hyphen or digit) still resolve as TipRule::Ref.
+        let repo = tempfile::tempdir().expect("tempdir");
+        jj_init(repo.path());
+        std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
+        jj(repo.path(), &["new", "-m", "first"]);
+        jj(repo.path(), &["bookmark", "set", "feature-1", "-r", "@-"]);
+        let head = RevisionId(jj_out(
+            repo.path(),
+            &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+        ));
+        // `@` in parent(@) is the tip-under-review, not the jj working copy.
+        let source = JjSource::change(
+            repo.path(),
+            BaseRuleset::new("parent(@)"),
+            "feature-1".to_string(),
+        )
+        .await
+        .expect("change");
+        assert!(
+            matches!(source.tip, TipRule::Ref { ref name } if name == "feature-1"),
+            "expected TipRule::Ref, got {:?}",
+            source.tip
+        );
+        let captured = source.capture().await.expect("capture");
+        assert!(captured.text.contains("+alpha"), "expected diff output");
+        assert_eq!(captured.head_revision, Some(head));
+        assert_eq!(
+            captured.base_revision,
+            Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
+        );
+        assert!(captured.base_tip_relative);
     }
 
     #[tokio::test]
@@ -911,16 +959,22 @@ index HASHES
         jj_init(repo.path());
         std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
         jj(repo.path(), &["new", "-m", "first"]);
-        // Record the change ID of @- (the "first" commit).
+        // Record the change ID and commit ID of @- (the "first" commit).
         let change_id = jj_out(
             repo.path(),
             &["log", "-r", "@-", "--no-graph", "-T", "change_id"],
         );
-        // Change IDs are all-lowercase letters — they pass looks_like_change_id.
+        let head = RevisionId(jj_out(
+            repo.path(),
+            &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+        ));
+        // Change IDs are all-lowercase letters; they pass looks_like_change_id.
         assert!(
             looks_like_change_id(&change_id),
             "jj change id should pass heuristic"
         );
+        // `@` in parent(@) is the tip-under-review (change_id = @-), not the
+        // jj working copy.  parent(@-) = the virtual root commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -939,6 +993,12 @@ index HASHES
             .await
             .expect("capture through ChangeId tip");
         assert!(captured.text.contains("+alpha"), "expected diff output");
+        assert_eq!(captured.head_revision, Some(head));
+        assert_eq!(
+            captured.base_revision,
+            Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
+        );
+        assert!(captured.base_tip_relative);
     }
 
     #[tokio::test]
@@ -951,6 +1011,8 @@ index HASHES
             repo.path(),
             &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
         );
+        // `@` in parent(@) is the tip-under-review (commit_sha = @-), not the
+        // jj working copy.  parent(@-) = the virtual root commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -965,6 +1027,12 @@ index HASHES
         );
         let captured = source.capture().await.expect("capture through Pinned tip");
         assert!(captured.text.contains("+alpha"), "expected diff output");
+        assert_eq!(captured.head_revision, Some(RevisionId(commit_sha.clone())));
+        assert_eq!(
+            captured.base_revision,
+            Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
+        );
+        assert!(captured.base_tip_relative);
     }
 
     #[tokio::test]
@@ -977,6 +1045,7 @@ index HASHES
         // jj failure when it is absent.
         std::fs::remove_dir_all(repo.path().join(".git")).expect("remove .git");
         let jj_repo = JjRepo::new(repo.path());
+        // The revision is never reached; git_repo_for_forge errors first.
         let err = jj_repo
             .publish_branch("origin", "main", &RevisionId("0".repeat(40)))
             .await
