@@ -41,7 +41,7 @@ pub enum HeadBranch {
     Unknown,
 }
 
-/// The branch state of the repository at `repo_root`. SCMs that have no
+/// Returns the branch state of the repository at `repo_root`. SCMs without a
 /// branch concept (Mercurial, Sapling) report [`HeadBranch::Unknown`].
 pub fn head_branch(repo_root: &Path, scm: ScmType) -> HeadBranch {
     match scm {

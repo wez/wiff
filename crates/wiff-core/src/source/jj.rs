@@ -20,37 +20,40 @@ use crate::source::{
     CapturedDiff, DiffSource, FetchSource, HeadBranch, Remote, ScmRepo, TrackingBranch,
 };
 
-/// The context wiff asks jj for around each hunk.  Matches the git constant so
-/// diffs from both SCMs have the same neighborhood width.
+/// Lines of unchanged context jj includes around each diff hunk, matching the
+/// `GIT_CONTEXT_LINES` of the git backend. The window is large enough that a
+/// hunk usually contains its whole file, regardless of which backend produced
+/// the diff.
 const JJ_CONTEXT_LINES: u32 = 3000;
 
-/// jj's virtual root commit ID (all zeros).  In jj 0.42+, `trunk()` resolves
-/// to this when no trunk is configured rather than returning empty; see
+/// jj's virtual root commit ID (all zeros). In jj 0.42+, `trunk()` resolves to
+/// this when no trunk is configured rather than returning empty. See
 /// <https://jj-vcs.github.io/jj/latest/revsets/#built-in-functions> for the
-/// `trunk()` semantics.  Any revset result equal to this should be treated as
+/// `trunk()` semantics. Any revset result equal to this should be treated as
 /// "not meaningfully resolved".
 const JJ_ROOT_COMMIT: &str = "0000000000000000000000000000000000000000";
 
 /// Revision resolution, diff production, and forge operations against a jj
-/// repository.  Holds the subprocess plumbing that both the base-ruleset
-/// resolver and a capture run through.
+/// repository. Contains the subprocess plumbing that both the base-ruleset
+/// resolver and [`JjSource::capture`](crate::source::DiffSource::capture) run
+/// through.
 #[derive(Debug, Clone)]
 pub struct JjRepo {
     repo_root: PathBuf,
 }
 
 impl JjRepo {
-    /// A handle to the jj repository rooted at `repo_root`.
+    /// Creates a handle to the jj repository rooted at `repo_root`.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         Self {
             repo_root: repo_root.into(),
         }
     }
 
-    /// A `GitRepo` pointed at the repo root, for forge operations (fetch, pin,
-    /// publish) that must speak git's ref and network protocol.  Only valid for
-    /// colocated jj+git workspaces where `.git` exists alongside `.jj`.  Returns
-    /// an error for non-colocated workspaces.
+    /// Returns a `GitRepo` pointed at the repo root, for forge operations
+    /// (fetch, pin, publish) that must speak git's ref and network protocol.
+    /// Only valid for colocated jj+git workspaces where `.git` exists alongside
+    /// `.jj`. Returns an error for non-colocated workspaces.
     fn git_repo_for_forge(&self) -> Result<GitRepo> {
         if self.repo_root.join(".git").exists() {
             Ok(GitRepo::new(self.repo_root.clone()))
@@ -64,8 +67,7 @@ impl JjRepo {
     }
 
     /// Run a jj subcommand under the repo root and return its output on
-    /// success.  jj is started in a fresh session so it has no controlling
-    /// terminal and cannot block on a credential prompt.
+    /// success.
     async fn jj<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
@@ -102,6 +104,10 @@ impl JjRepo {
             .args(args);
         command.stdin(Stdio::null());
         unsafe {
+            // A new session starts without a controlling terminal. jj's
+            // credential prompt opens /dev/tty directly rather than using
+            // stdin/stdout, and that open fails immediately in a session
+            // lacking one, instead of the prompt waiting forever for input.
             command.pre_exec(|| {
                 if nix::libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -128,17 +134,14 @@ impl JjRepo {
     }
 
     /// Run a jj query that prints one commit hash per line, returning the
-    /// first.  A nonzero exit that represents "nothing matched" yields
-    /// `Ok(None)`; any other nonzero exit is a genuine jj failure.
+    /// first. Exit code 1 means "nothing matched" and yields `Ok(None)`. Any
+    /// other nonzero exit is a jj failure and returns `Err`.
     ///
-    /// Caveat: jj uses exit code 1 for both "revset matched nothing" and
-    /// "revset failed to parse", so a malformed revset is silently treated as
-    /// `Ok(None)` rather than an error.  There is no clean flag-based way to
-    /// distinguish the two; the stderr text differs ("Failed to parse revset"
-    /// vs "doesn't exist") but inspecting it is fragile.  Callers that
-    /// construct revsets programmatically (e.g. `bookmarks(exact:"...")`)
-    /// should use forms that are always syntactically valid so a logic error
-    /// surfaces as a missing result rather than a silent wrong answer.
+    /// Caveat: jj exits 1 both when a revset matches nothing and when a revset
+    /// fails to parse, and this function has no other signal to tell the two
+    /// apart. A malformed revset yields `Ok(None)` here rather than an `Err`.
+    /// Give this only revsets you know are syntactically valid (e.g.
+    /// `bookmarks(exact:"...")`).
     async fn rev_query(&self, args: &[OsString]) -> Result<Option<RevisionId>> {
         let output = self.spawn(args).await?;
         match output.status.code() {
@@ -167,7 +170,7 @@ impl JjRepo {
         }
     }
 
-    /// Resolve `revset` to a single commit hash via `jj log`.
+    /// Resolve `revset` to a commit hash via `jj log`.
     async fn resolve_revset(&self, revset: &str) -> Result<Option<RevisionId>> {
         self.rev_query(&[
             "log".into(),
@@ -183,8 +186,7 @@ impl JjRepo {
         .await
     }
 
-    /// The first local (non-tracking) bookmark on `@`, or `None` when `@` has
-    /// no local bookmarks.
+    /// Returns the first local (non-tracking) bookmark on `@`.
     async fn current_bookmark(&self) -> Result<Option<String>> {
         let output = self
             .jj([
@@ -242,9 +244,9 @@ impl JjRepo {
     }
 }
 
-/// The branch state of the jj workspace at `repo_root`, reported as `On` with
-/// a pseudo-ref when `@` has a local bookmark, `Detached` when it has none,
-/// and `Unknown` when jj cannot be reached or gives an unreadable answer.
+/// Reports the branch state of the jj workspace at `repo_root`: `On` with a
+/// pseudo-ref naming the local bookmark on `@`, or `Detached`/`Unknown` when
+/// there is none to report or the state could not be read.
 pub fn head_branch(repo_root: &Path) -> HeadBranch {
     let Ok(output) = std::process::Command::new("jj")
         .arg("-R")
@@ -287,16 +289,18 @@ impl RevisionResolver for JjRepo {
     }
 
     async fn trunk(&self) -> Result<Option<RevisionId>> {
-        // jj's `trunk()` revset resolves the configured trunk branch; see
-        // https://jj-vcs.github.io/jj/latest/revsets/#built-in-functions.  In
-        // jj 0.42+, it always resolves but defaults to the all-zeros root
-        // commit when unconfigured rather than returning empty.  Treat the root
-        // commit as "not configured" and fall back to well-known bookmark names.
+        // jj's `trunk()` revset resolves the configured trunk branch. See
+        // https://jj-vcs.github.io/jj/latest/revsets/#built-in-functions. In jj
+        // 0.42+, it always resolves, defaulting to the all-zeros root commit
+        // (`JJ_ROOT_COMMIT`) rather than returning empty when no trunk is
+        // configured.
         if let Some(rev) = self.resolve_revset("trunk()").await?
             && rev.as_str() != JJ_ROOT_COMMIT
         {
             return Ok(Some(rev));
         }
+        // The root commit above means jj has not configured a trunk. Fall back
+        // to the two most common default branch names.
         for name in ["main", "master"] {
             if let Some(rev) = self.resolve_revset(name).await? {
                 return Ok(Some(rev));
@@ -306,13 +310,14 @@ impl RevisionResolver for JjRepo {
     }
 
     async fn upstream(&self) -> Result<Option<RevisionId>> {
-        // Resolve the remote-tracking bookmark for the current change. jj
-        // expresses this as `<bookmark>@<remote>`; without a local bookmark on
-        // `@` there is no upstream to resolve.
+        // Resolve the remote-tracking bookmark for the current change.
         let Some(bookmark) = self.current_bookmark().await? else {
+            // A remote-tracking query needs the local bookmark's name. `@` has
+            // none here.
             return Ok(None);
         };
         for remote in ["origin", "upstream"] {
+            // jj expresses a remote-tracking bookmark as `<bookmark>@<remote>`.
             if let Some(rev) = self.resolve_revset(&format!("{bookmark}@{remote}")).await? {
                 return Ok(Some(rev));
             }
@@ -326,7 +331,9 @@ impl RevisionResolver for JjRepo {
             .await?
         {
             Some(parent) => Ok(Some(parent)),
-            // A root commit has no parent; fall back to jj's virtual root.
+            // `parents()` finds none for a root commit. Fall back to jj's
+            // virtual root, the commit every revision in the repo descends
+            // from.
             None => self.empty().await,
         }
     }
@@ -394,8 +401,8 @@ impl ScmRepo for JjRepo {
     }
 
     async fn working_tree_is_clean(&self) -> Result<bool> {
-        // jj always commits the working copy into `@`; "clean" means `@` has
-        // no changes relative to its parent, which `jj diff` shows as empty.
+        // jj always commits the working copy into `@`. "Clean" means `@` has no
+        // changes relative to its parent, which `jj diff` shows as empty.
         let output = self.jj(["diff", "--git"]).await?;
         let text = String::from_utf8(output.stdout)
             .map_err(|source| Error::Repo(format!("jj printed a non-UTF-8 diff: {source}")))?;
@@ -428,10 +435,10 @@ impl ScmRepo for JjRepo {
 
     async fn publish_branch(&self, remote: &str, branch: &str, commit: &RevisionId) -> Result<()> {
         // git_repo_for_forge errors when .git is absent (i.e. the repo is not
-        // colocated).  Propagating that error with `?` here surfaces the
+        // colocated).  Propagating that error with `?` here reports the
         // problem with a clear message before any jj subprocess runs, rather
         // than letting the user see a cryptic "jj git push failed".  The
-        // GitRepo handle itself is not needed; only the check matters.
+        // GitRepo handle itself is not needed here.  Only the check matters.
         let _ = self.git_repo_for_forge()?;
         self.jj(["bookmark", "set", branch, "-r", commit.as_str()])
             .await?;
@@ -445,19 +452,23 @@ impl ScmRepo for JjRepo {
     }
 }
 
-/// A jj diff of a reviewed range: a base ruleset and a tip rule that resolve
-/// to concrete commits, then diffed.  A working-tree tip diffs the resolved
-/// base against the uncommitted working copy (`@`); a ref, change-id, or
-/// pinned tip diffs the base against the resolved tip commit.
+/// A [`DiffSource`] over a jj repository. Capture re-resolves the base and tip
+/// from scratch each time rather than fixing them at construction. A session
+/// reviewing a branch or change picks up the commit it currently points to,
+/// even after a rebase or amend moves it.
 #[derive(Debug, Clone)]
 pub struct JjSource {
     repo: JjRepo,
+    /// How the base of the reviewed range is resolved, re-evaluated on every
+    /// capture.
     base: BaseRuleset,
+    /// How the tip of the reviewed range is resolved, re-evaluated on every
+    /// capture.
     tip: TipRule,
 }
 
 impl JjSource {
-    /// A source reviewing the working copy (`@`) against `base`.
+    /// Creates a source reviewing the working copy (`@`) against `base`.
     pub fn working_copy(repo_root: impl Into<PathBuf>, base: BaseRuleset) -> Self {
         Self {
             repo: JjRepo::new(repo_root),
@@ -466,8 +477,8 @@ impl JjSource {
         }
     }
 
-    /// A source reviewing `base` against the commit a ref, change-id, or
-    /// pinned `tip` resolves to.
+    /// Creates a source reviewing `base` against whatever commit `tip`
+    /// resolves to.
     pub fn revision(repo_root: impl Into<PathBuf>, base: BaseRuleset, tip: TipRule) -> Self {
         Self {
             repo: JjRepo::new(repo_root),
@@ -476,14 +487,11 @@ impl JjSource {
         }
     }
 
-    /// Build a source reviewing `change` against `base`.  A `change` that
-    /// names a local bookmark is tracked as a [`Ref`](TipRule::Ref) tip; a
-    /// jj change ID (all-lowercase letters, no digits) is held as a
-    /// [`ChangeId`](TipRule::ChangeId); anything else is resolved to a commit
-    /// and held as a [`Pinned`](TipRule::Pinned) tip.  Bookmark existence is
-    /// checked before the change-ID heuristic so that all-lowercase bookmark
-    /// names like `master` or `develop` are not misclassified.  Errors when
-    /// `change` resolves to no commit.
+    /// Build a source reviewing `change` against `base`, classifying it as a
+    /// [`Ref`](TipRule::Ref), [`ChangeId`](TipRule::ChangeId), or
+    /// [`Pinned`](TipRule::Pinned) tip. Bookmark lookup takes priority over
+    /// the change-ID heuristic: an all-lowercase bookmark name like `master`
+    /// still resolves to `Ref`. Errors if `change` resolves to nothing.
     pub async fn change(
         repo_root: impl Into<PathBuf>,
         base: BaseRuleset,
@@ -493,19 +501,16 @@ impl JjSource {
         let tip = if repo
             .resolve_revset(&format!(
                 "bookmarks(exact:\"{}\")",
-                // jj bookmark names cannot contain `"` or `\`, so this
-                // escaping is complete for all reachable inputs.
+                // jj bookmark names cannot contain `"` or `\`. Escaping only
+                // `"` is complete: a bookmark name cannot contain a literal `\`
+                // for this replace to collide with.
                 change.replace('"', "\\\"")
             ))
             .await?
             .is_some()
         {
             // Storing the name as TipRule::Ref lets it re-resolve to the
-            // bookmark's current commit on every wiff recapture.  Note that
-            // detection uses `bookmarks(exact:"...")` while `resolve_tip` for
-            // `TipRule::Ref` re-resolves the bare name as a generic revset;
-            // these are equivalent for real bookmark names but are different
-            // code paths.
+            // current commit of the bookmark on every wiff recapture.
             TipRule::Ref { name: change }
         } else if looks_like_change_id(&change) {
             // A jj change ID tracks the logical change across rewrites.
@@ -523,11 +528,9 @@ impl JjSource {
         Ok(Self { repo, base, tip })
     }
 
-    /// The base ruleset pinning the review at the parent of the working copy
-    /// (`@-`).  In jj all working-copy changes live in `@` itself, so diffing
-    /// `@-` → `@` shows exactly what `@` contributes — the jj equivalent of
-    /// `git diff HEAD`.  Falls back to the empty tree for a repo whose first
-    /// commit has no parent.
+    /// Builds the base ruleset that pins the review at the parent of the
+    /// working copy (`@-`), the jj equivalent of `git diff HEAD`. Falls back
+    /// to the empty tree for a repo whose first commit has no parent.
     pub async fn pinned_base_at_head(repo_root: impl Into<PathBuf>) -> Result<BaseRuleset> {
         let repo = JjRepo::new(repo_root);
         Ok(match repo.resolve_revset("@-").await? {
@@ -536,10 +539,7 @@ impl JjSource {
         })
     }
 
-    /// Resolve the tip rule to the commit the diff runs up to.  A working-copy
-    /// tip resolves `@`; a change ID resolves its current commit through jj's
-    /// native addressing; a ref re-resolves its bookmark; a pinned tip
-    /// verifies the commit still exists.
+    /// Resolve the tip rule to the commit the diff runs up to.
     async fn resolve_tip(&self) -> Result<RevisionId> {
         match &self.tip {
             TipRule::Index => Err(Error::Source(
@@ -550,6 +550,10 @@ impl JjSource {
                 .resolve_revset("@")
                 .await?
                 .ok_or_else(|| Error::Source("jj could not resolve @".to_string())),
+            // Detection above matched this name with `bookmarks(exact:"...")`;
+            // here it is instead handed to the revset resolver as a bare
+            // name. The two are equivalent for a real bookmark name, which is
+            // the only name this arm is reached with.
             TipRule::Ref { name } => self
                 .repo
                 .resolve_revset(name)
@@ -572,10 +576,10 @@ impl JjSource {
 }
 
 /// Heuristic: a jj change ID uses only lowercase letters (no digits, no
-/// uppercase).  Commit hashes are hex (digits + a–f), bookmark names typically
+/// uppercase).  Commit hashes are hex (digits + a-f), bookmark names typically
 /// contain slashes or digits, and revsets contain operators.
 fn looks_like_change_id(s: &str) -> bool {
-    // jj change IDs are random lowercase-letter strings; common branch names
+    // jj change IDs are random lowercase-letter strings. Common branch names
     // (main, dev, feat) are short. Require at least 5 chars to avoid treating
     // short bookmark names as change IDs.
     s.len() >= 5 && s.chars().all(|c| c.is_ascii_lowercase())
@@ -631,8 +635,8 @@ mod tests {
     use crate::source::DiffSource;
 
     /// Run `jj` with `args` in `repo`, asserting success.  HOME is set to the
-    /// parent of `repo` so jj writes its user config outside the git repo,
-    /// preventing it from appearing in commits.
+    /// parent of `repo`.  jj writes its user config under HOME, keeping that
+    /// config outside the git repo and out of its commits.
     fn jj(repo: &Path, args: &[&str]) -> std::process::Output {
         let home = repo.parent().unwrap_or(repo);
         let output = std::process::Command::new("jj")
@@ -663,8 +667,9 @@ mod tests {
     }
 
     /// Initialize a new jj repo in `dir` with git backend.  Does NOT pass `-R`
-    /// since the repo doesn't exist yet.  HOME is set to the parent of `dir` so
-    /// jj writes its user config outside the git repo.
+    /// since the repo doesn't exist yet.  HOME is set to the parent of `dir`.
+    /// jj writes its user config under HOME, keeping that config outside the
+    /// git repo.
     fn jj_init(dir: &Path) {
         let home = dir.parent().unwrap_or(dir);
         let output = std::process::Command::new("jj")
@@ -684,8 +689,9 @@ mod tests {
         );
     }
 
-    /// Blank the variable `index <old>..<new>` blob hashes so the captured
-    /// patch can be asserted whole.
+    /// Blank the variable `index <old>..<new>` blob hashes in `text`, the only
+    /// part of a captured patch that differs between runs.  The result can be
+    /// asserted whole.
     fn stable(text: &str) -> String {
         text.lines()
             .map(|line| {
@@ -703,10 +709,14 @@ mod tests {
     fn looks_like_change_id_accepts_lowercase_letter_strings() {
         assert!(looks_like_change_id("kkmpptxz"));
         assert!(looks_like_change_id("qouvsmrv"));
-        assert!(!looks_like_change_id("abc123")); // contains digit
-        assert!(!looks_like_change_id("main")); // bookmark: looks like change id, but short
-        assert!(!looks_like_change_id("")); // empty
-        assert!(!looks_like_change_id("refs/heads/main")); // contains slash
+        assert!(!looks_like_change_id("abc123")); // digits disqualify it
+        // Below the 5-char minimum that keeps short bookmark names like this
+        // from being misread as change IDs.
+        assert!(!looks_like_change_id("main"));
+        assert!(!looks_like_change_id("")); // shorter still
+        // The slash is not an ASCII lowercase letter, failing the
+        // all-lowercase-letters check.
+        assert!(!looks_like_change_id("refs/heads/main"));
     }
 
     #[tokio::test]
@@ -741,14 +751,14 @@ index HASHES
 @@ -0,0 +1,1 @@
 +gamma";
         assert_eq!(stable(&captured.text), expected.to_string());
-        // The base is pinned at @- (parent), so base_revision is that commit.
+        // The base is pinned at @- (parent). base_revision reports that commit
+        // directly, with no further resolution.
         assert_eq!(captured.base_revision, Some(parent_sha));
         assert!(!captured.base_tip_relative);
         assert!(matches!(captured.source, SourceKind::Scm(_)));
         if let SourceKind::Scm(src) = &captured.source {
             assert_eq!(src.scm, ScmType::Jujutsu);
             assert!(matches!(src.tip, TipRule::WorkingCopy));
-            // @ has no local bookmark, so branch_hint is None.
             assert!(src.branch_hint.is_none());
         }
         assert!(captured.head_revision.is_none());
@@ -789,8 +799,8 @@ index HASHES
 +beta";
         assert_eq!(stable(&captured.text), expected.to_string());
         assert_eq!(captured.head_revision, Some(head));
-        // parent(@) on jj's first commit resolves to jj's virtual root commit
-        // (all zeros), which represents the empty state before any commits.
+        // parent(@) on the first commit in jj resolves to the virtual root
+        // commit (all zeros) described on `JJ_ROOT_COMMIT`.
         assert_eq!(
             captured.base_revision,
             Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
@@ -827,15 +837,18 @@ index HASHES
         ));
 
         let jj_repo = JjRepo::new(repo.path());
-        // In jj 0.42+, trunk() resolves but defaults to the root commit (all
-        // zeros) when unconfigured. Verify that so we know the fallback path
-        // is exercised: trunk() resolves to root → ignored → main bookmark found.
+        // This repo has not configured a trunk. jj 0.42+ resolves trunk() to
+        // the root commit (`JJ_ROOT_COMMIT`) rather than returning empty in
+        // that case, which this assertion confirms.
         let trunk_revset = jj_repo.resolve_revset("trunk()").await.expect("revset");
         assert_eq!(
             trunk_revset,
             Some(RevisionId(JJ_ROOT_COMMIT.to_string())),
             "trunk() should resolve to root commit (all zeros) when unconfigured"
         );
+        // With trunk() confirmed unconfigured above, this exercises the
+        // bookmark-name fallback in JjRepo::trunk rather than its trunk()
+        // path.
         let trunk = jj_repo.trunk().await.expect("trunk");
         assert_eq!(
             trunk,
@@ -856,9 +869,11 @@ index HASHES
     #[tokio::test]
     async fn working_copy_in_a_root_only_repo_captures_the_diff() {
         // The very first change in a fresh repo: @- is the virtual root commit,
-        // so pinned_base_at_head falls back to BaseRuleset::empty(), which must
-        // resolve to JJ_ROOT_COMMIT (not the git empty-tree SHA1, which jj
-        // cannot diff from).
+        // which pinned_base_at_head treats as having no real parent. It falls
+        // back to BaseRuleset::empty(), which resolves to JJ_ROOT_COMMIT
+        // rather than git's empty-tree SHA1. jj diff can diff from
+        // JJ_ROOT_COMMIT, a real commit in its history, but not from git's
+        // empty-tree SHA1, a tree object that jj's revsets do not resolve.
         let repo = tempfile::tempdir().expect("tempdir");
         jj_init(repo.path());
         std::fs::write(repo.path().join("f.txt"), "hello\n").expect("write");
@@ -879,7 +894,7 @@ index HASHES
     #[tokio::test]
     async fn change_with_a_bookmark_name_records_a_ref_tip() {
         // Bookmark names that pass the change-id heuristic (all lowercase, >=5
-        // chars) must not be misclassified; bookmark existence takes priority.
+        // chars) must not be misclassified. Bookmark existence takes priority.
         let repo = tempfile::tempdir().expect("tempdir");
         jj_init(repo.path());
         std::fs::write(repo.path().join("f.txt"), "alpha\n").expect("write");
@@ -890,8 +905,8 @@ index HASHES
             repo.path(),
             &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
         ));
-        // `@` in parent(@) is the tip-under-review (master = @-), not the jj
-        // working copy.  parent(master) = the virtual root commit.
+        // `resolve_base` substitutes the commit "master" resolves to for `@`
+        // in the "parent(@)" ruleset below, not jj's own working-copy commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -910,6 +925,9 @@ index HASHES
         let captured = source.capture().await.expect("capture through Ref tip");
         assert!(captured.text.contains("+alpha"), "expected diff output");
         assert_eq!(captured.head_revision, Some(head));
+        // "master" is the only real commit in this repo. jj created it directly
+        // on top of the virtual root commit described on `JJ_ROOT_COMMIT`. That
+        // root is its parent and only ancestor.
         assert_eq!(
             captured.base_revision,
             Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
@@ -930,7 +948,9 @@ index HASHES
             repo.path(),
             &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
         ));
-        // `@` in parent(@) is the tip-under-review, not the jj working copy.
+        // `resolve_base` substitutes the commit "feature-1" resolves to for
+        // `@` in the "parent(@)" ruleset below, not jj's own working-copy
+        // commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -946,6 +966,9 @@ index HASHES
         let captured = source.capture().await.expect("capture");
         assert!(captured.text.contains("+alpha"), "expected diff output");
         assert_eq!(captured.head_revision, Some(head));
+        // "feature-1" is the only real commit in this repo. jj created it
+        // directly on top of the virtual root commit described on
+        // `JJ_ROOT_COMMIT`. That root is its parent and only ancestor.
         assert_eq!(
             captured.base_revision,
             Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
@@ -968,13 +991,15 @@ index HASHES
             repo.path(),
             &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
         ));
-        // Change IDs are all-lowercase letters; they pass looks_like_change_id.
+        // Change IDs are all-lowercase letters, which is what
+        // looks_like_change_id checks for.
         assert!(
             looks_like_change_id(&change_id),
             "jj change id should pass heuristic"
         );
-        // `@` in parent(@) is the tip-under-review (change_id = @-), not the
-        // jj working copy.  parent(@-) = the virtual root commit.
+        // `resolve_base` substitutes the commit `change_id` resolves to for
+        // `@` in the "parent(@)" ruleset below, not jj's own working-copy
+        // commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -994,6 +1019,9 @@ index HASHES
             .expect("capture through ChangeId tip");
         assert!(captured.text.contains("+alpha"), "expected diff output");
         assert_eq!(captured.head_revision, Some(head));
+        // `change_id` is the only real commit in this repo. jj created it
+        // directly on top of the virtual root commit described on
+        // `JJ_ROOT_COMMIT`. That root is its parent and only ancestor.
         assert_eq!(
             captured.base_revision,
             Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
@@ -1011,8 +1039,8 @@ index HASHES
             repo.path(),
             &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
         );
-        // `@` in parent(@) is the tip-under-review (commit_sha = @-), not the
-        // jj working copy.  parent(@-) = the virtual root commit.
+        // `resolve_base` substitutes the commit `commit_sha` names for `@` in
+        // the "parent(@)" ruleset below, not jj's own working-copy commit.
         let source = JjSource::change(
             repo.path(),
             BaseRuleset::new("parent(@)"),
@@ -1028,6 +1056,9 @@ index HASHES
         let captured = source.capture().await.expect("capture through Pinned tip");
         assert!(captured.text.contains("+alpha"), "expected diff output");
         assert_eq!(captured.head_revision, Some(RevisionId(commit_sha.clone())));
+        // `commit_sha` is the only real commit in this repo. jj created it
+        // directly on top of the virtual root commit described on
+        // `JJ_ROOT_COMMIT`. That root is its parent and only ancestor.
         assert_eq!(
             captured.base_revision,
             Some(RevisionId(JJ_ROOT_COMMIT.to_string()))
@@ -1040,12 +1071,11 @@ index HASHES
         let repo = tempfile::tempdir().expect("tempdir");
         jj_init(repo.path());
         // Simulate a non-colocated workspace by removing the .git directory
-        // that jj git init --colocate creates. git_repo_for_forge checks for
-        // .git existence and must return a clear error rather than a cryptic
-        // jj failure when it is absent.
+        // that jj git init --colocate creates.
         std::fs::remove_dir_all(repo.path().join(".git")).expect("remove .git");
         let jj_repo = JjRepo::new(repo.path());
-        // The revision is never reached; git_repo_for_forge errors first.
+        // A placeholder revision: `publish_branch` rejects the missing `.git`
+        // in `git_repo_for_forge` before it would resolve or use the revision.
         let err = jj_repo
             .publish_branch("origin", "main", &RevisionId("0".repeat(40)))
             .await

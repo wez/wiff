@@ -210,8 +210,9 @@ async fn git_source(
 
 /// Build the jj source for `selection`.  An explicit `base` overrides the
 /// default: a working-copy review otherwise pins its base at `@-`, while a
-/// named change reviews against its first parent.  jj has no staging area, so
-/// `Staged` is rejected with a clear error.
+/// named change reviews against its first parent.  jj has no staging area to
+/// diff against. This function returns a clear error for `Staged` rather than
+/// attempting a diff with nothing to produce it.
 async fn jj_source(
     root: PathBuf,
     selection: DiffSelection,
@@ -232,7 +233,7 @@ async fn jj_source(
     })
 }
 
-/// The explicit `base`, or the git ruleset pinning the review at HEAD.
+/// Returns the explicit `base`, or the git ruleset pinning the review at HEAD.
 async fn git_pinned_or(base: Option<BaseRuleset>, root: &Path) -> anyhow::Result<BaseRuleset> {
     match base {
         Some(base) => Ok(base),
@@ -240,7 +241,7 @@ async fn git_pinned_or(base: Option<BaseRuleset>, root: &Path) -> anyhow::Result
     }
 }
 
-/// The explicit `base`, or the jj ruleset pinning the review at `@-`.
+/// Returns the explicit `base`, or the jj ruleset pinning the review at `@-`.
 async fn jj_pinned_or(base: Option<BaseRuleset>, root: &Path) -> anyhow::Result<BaseRuleset> {
     match base {
         Some(base) => Ok(base),
