@@ -134,7 +134,7 @@ jobs:
       # Keyless Sigstore provenance for the uploaded archive, bound to this
       # workflow's OIDC identity. Verify a download with:
       #   gh attestation verify wiff-<target>.tar.gz --repo wez/wiff
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.upload.outputs.tar }}
 
