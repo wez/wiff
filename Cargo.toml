@@ -35,7 +35,7 @@ fancy-regex = "0.19"
 futures = "0.3"
 globset = "0.4"
 ignore = "0.4"
-nix = { version = "0.30", features = ["fs", "poll", "signal"] }
+nix = { version = "0.31", features = ["fs", "poll", "signal"] }
 nucleo-matcher = "0.3"
 octocrab = "0.54"
 percent-encoding = "2"
