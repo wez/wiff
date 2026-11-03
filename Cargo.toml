@@ -31,7 +31,7 @@ bitflags = "2"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
-fancy-regex = "0.19"
+fancy-regex = "0.20"
 futures = "0.3"
 globset = "0.4"
 ignore = "0.4"
